@@ -211,7 +211,7 @@ async def process_reports(files: list[UploadFile] = File(...)):
 
         prompt = EXTRACTION_PROMPT.replace("<<report_text>>", text)
         parsed = None
-        for attempt in range(2):  # try twice
+        for attempt in range(2):
             result = call_ai(prompt)
             try:
                 parsed = json.loads(result)
