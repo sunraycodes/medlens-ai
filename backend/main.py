@@ -1,6 +1,8 @@
 import os
 import json
 import io
+import uuid
+from datetime import datetime
 import requests
 import pdfplumber
 import chromadb
@@ -26,6 +28,8 @@ app.add_middleware(
 )
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY not found in environment variables")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODELS_TO_TRY = [
@@ -90,6 +94,26 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
     else:
         return content.decode("utf-8", errors="ignore")
 
+
+def parse_date_safe(date_str):
+    if not date_str:
+        return datetime.min
+
+    formats = [
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y/%m/%d"
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+
+    return datetime.min
 
 def compute_trends(valid_reports: list) -> list:
     """Algorithmically detect trends in lab values across reports (no AI)."""
@@ -226,7 +250,9 @@ async def process_reports(files: list[UploadFile] = File(...)):
             extracted_reports.append({"error": "parse_failed", "raw": result, "filename": f.filename})
 
     valid_reports = [r for r in extracted_reports if "error" not in r]
-    valid_reports.sort(key=lambda x: x.get("date", ""))
+    valid_reports.sort(
+    key=lambda x: parse_date_safe(x.get("date", ""))
+    )
 
     analysis_prompt = ANALYSIS_PROMPT.replace("<<n>>", str(len(valid_reports)))
     analysis_prompt = analysis_prompt.replace("<<json_data>>", json.dumps(valid_reports, indent=2))
