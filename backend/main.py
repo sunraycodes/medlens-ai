@@ -291,8 +291,13 @@ async def process_reports(files: list[UploadFile] = File(...)):
 
         prompt = EXTRACTION_PROMPT.replace("<<report_text>>", text)
         parsed = None
+<<<<<<< HEAD
         raw_result = ""
         for attempt in range(2):
+=======
+        for attempt in range(2):
+            result = call_ai(prompt)
+>>>>>>> b3daca393f39bae66b2b139a3806e7cfa55a05c1
             try:
                 raw_result = call_ai(prompt)
                 parsed = json.loads(raw_result)
@@ -313,6 +318,7 @@ async def process_reports(files: list[UploadFile] = File(...)):
         time.sleep(1)
 
     valid_reports = [r for r in extracted_reports if "error" not in r]
+<<<<<<< HEAD
     valid_reports.sort(key=lambda x: parse_date_safe(x.get("date", "")))
 
     try:
@@ -323,6 +329,11 @@ async def process_reports(files: list[UploadFile] = File(...)):
     except Exception as e:
         print(f"Analysis failed: {e}")
         analysis = {"patient_summary": {}, "timeline": [], "risk_flags": []}
+=======
+    valid_reports.sort(
+    key=lambda x: parse_date_safe(x.get("date", ""))
+    )
+>>>>>>> b3daca393f39bae66b2b139a3806e7cfa55a05c1
 
     trends = compute_trends(valid_reports)
     knowledge_graph = build_knowledge_graph(analysis.get("patient_summary", {}))
