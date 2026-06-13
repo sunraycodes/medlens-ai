@@ -35,7 +35,6 @@ MODELS_TO_TRY = [
     "qwen/qwen-2.5-72b-instruct:free",
 ]
 
-# ---- ChromaDB setup for RAG ----
 chroma_client = chromadb.Client()
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 collection = chroma_client.get_or_create_collection(
@@ -94,7 +93,7 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
 
 def compute_trends(valid_reports: list) -> list:
     """Algorithmically detect trends in lab values across reports (no AI)."""
-    test_history = {}  # test_name -> list of (date, numeric_value, unit)
+    test_history = {}
 
     for report in valid_reports:
         date = report.get("date", "")
@@ -104,12 +103,9 @@ def compute_trends(valid_reports: list) -> list:
             if not test_name or not value_str:
                 continue
 
-            # Extract numeric part from strings like "142 mg/dL" or "6.8%"
-            # Skip composite values like blood pressure (e.g. "148/95 mmHg")
             if "/" in value_str:
                 continue
 
-            # Extract numeric part from strings like "142 mg/dL" or "6.8%"
             num = ""
             unit = ""
             for ch in value_str:
@@ -189,7 +185,6 @@ def build_knowledge_graph(patient_summary: dict) -> dict:
 async def process_reports(files: list[UploadFile] = File(...)):
     extracted_reports = []
 
-    # Clear previous session's vector store entries (fresh demo each time)
     try:
         existing = collection.get()
         if existing and existing.get("ids"):
@@ -205,7 +200,6 @@ async def process_reports(files: list[UploadFile] = File(...)):
             extracted_reports.append({"error": "empty_or_unreadable", "filename": f.filename})
             continue
 
-        # Add to vector DB for RAG-based Q&A
         try:
             collection.add(
                 documents=[text],
