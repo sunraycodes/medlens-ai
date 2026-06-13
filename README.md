@@ -68,8 +68,7 @@ Returns a downloadable PDF of the doctor handoff summary.
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate   # Windows
-# source venv/bin/activate   # Mac/Linux
+venv\Scripts\activate
 
 pip install -r requirements.txt
 ```
