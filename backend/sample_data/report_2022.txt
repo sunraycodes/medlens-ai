@@ -1,0 +1,8 @@
+Patient: John Doe, Age 45
+Date: March 2022
+Visit Type: General Checkup
+
+Blood Pressure: 148/95 mmHg
+Diagnosis: Hypertension - Stage 1
+Prescribed: Amlodipine 5mg once daily
+Notes: Advised lifestyle modification, low sodium diet.

@@ -1,0 +1,8 @@
+Patient: John Doe, Age 47
+Date: August 2024
+Visit Type: Blood Work
+
+Fasting Blood Glucose: 142 mg/dL
+HbA1c: 6.8% (Diabetic range)
+Blood Pressure: 138/88 mmHg
+Notes: No follow-up diabetes consultation scheduled. Patient advised to recheck in 6 months.

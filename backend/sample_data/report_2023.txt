@@ -1,0 +1,8 @@
+Patient: John Doe, Age 46
+Date: June 2023
+Visit Type: Annual Blood Work
+
+Fasting Blood Glucose: 118 mg/dL (slightly elevated)
+HbA1c: 5.9%
+Blood Pressure: 142/90 mmHg
+Notes: Continue Amlodipine. Monitor glucose levels. No diabetes diagnosis given.

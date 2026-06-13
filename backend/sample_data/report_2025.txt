@@ -1,0 +1,10 @@
+Patient: John Doe, Age 48
+Date: February 2025
+Visit Type: Follow-up
+
+Diagnosis: Type 2 Diabetes Mellitus
+HbA1c: 7.4%
+Creatinine: 1.4 mg/dL (mildly elevated)
+eGFR: 68 (mildly reduced)
+Allergies: Penicillin (documented)
+Prescribed: Metformin 500mg twice daily, continue Amlodipine 5mg
