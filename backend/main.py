@@ -1,6 +1,8 @@
 import os
 import json
 import io
+import uuid
+from datetime import datetime
 import requests
 import pdfplumber
 import chromadb
@@ -13,6 +15,7 @@ from prompts import EXTRACTION_PROMPT, ANALYSIS_PROMPT, DOCTOR_SUMMARY_PROMPT, R
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+import time
 
 load_dotenv()
 
@@ -26,16 +29,18 @@ app.add_middleware(
 )
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY not found in environment variables")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODELS_TO_TRY = [
-    "openrouter/free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openai/gpt-oss-120b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "deepseek/deepseek-r1:free",
-    "qwen/qwen-2.5-72b-instruct:free",
 ]
 
-# ---- ChromaDB setup for RAG ----
 chroma_client = chromadb.Client()
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 collection = chroma_client.get_or_create_collection(
@@ -64,16 +69,20 @@ def call_ai(prompt: str) -> str:
             )
             result = response.json()
             if "choices" not in result:
+                print(f"Model {m} returned no choices: {result}")
                 last_error = result
                 continue
             text = result["choices"][0]["message"]["content"].strip()
-            if text.startswith("```"):
-                text = text.strip("`")
-                if text.startswith("json"):
-                    text = text[4:]
-            return text.strip()
+            # Strip all markdown code fences
+            text = text.strip()
+            if "```" in text:
+                import re
+                text = re.sub(r"```(?:json)?\s*", "", text)
+                text = text.replace("```", "").strip()
+            return text
         except Exception as e:
             last_error = e
+            print(f"Model {m} exception: {e}")
             continue
     raise Exception(f"All models failed: {last_error}")
 
@@ -82,19 +91,89 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
     filename = file.filename.lower()
     if filename.endswith(".pdf"):
         text = ""
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-        return text
+        # First attempt: pdfplumber (strict)
+        try:
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            if text.strip():
+                return text
+        except Exception:
+            pass
+
+        # Second attempt: pdfplumber with caching disabled (handles bad XRef)
+        try:
+            with pdfplumber.open(io.BytesIO(content), laparams={}) as pdf:
+                for page in pdf.pages:
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+                    except Exception:
+                        continue
+            if text.strip():
+                return text
+        except Exception:
+            pass
+
+        # Third attempt: pdfminer directly with relaxed settings
+        try:
+            from pdfminer.high_level import extract_text as pdfminer_extract
+            from pdfminer.pdfpage import PDFPage
+            from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+            from pdfminer.converter import TextConverter
+            from pdfminer.layout import LAParams
+
+            rsrcmgr = PDFResourceManager(caching=False)
+            out = io.StringIO()
+            device = TextConverter(rsrcmgr, out, laparams=LAParams())
+            interpreter = PDFPageInterpreter(rsrcmgr, device)
+            for page in PDFPage.get_pages(
+                io.BytesIO(content),
+                check_extractable=False,  # skip extractable check
+            ):
+                try:
+                    interpreter.process_page(page)
+                except Exception:
+                    continue
+            text = out.getvalue()
+            device.close()
+            if text.strip():
+                return text
+        except Exception:
+            pass
+
+        # If all PDF attempts fail, return empty string (handled upstream)
+        return ""
     else:
         return content.decode("utf-8", errors="ignore")
 
 
+def parse_date_safe(date_str):
+    if not date_str:
+        return datetime.min
+
+    formats = [
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y/%m/%d"
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+
+    return datetime.min
+
 def compute_trends(valid_reports: list) -> list:
     """Algorithmically detect trends in lab values across reports (no AI)."""
-    test_history = {}  # test_name -> list of (date, numeric_value, unit)
+    test_history = {}
 
     for report in valid_reports:
         date = report.get("date", "")
@@ -104,12 +183,9 @@ def compute_trends(valid_reports: list) -> list:
             if not test_name or not value_str:
                 continue
 
-            # Extract numeric part from strings like "142 mg/dL" or "6.8%"
-            # Skip composite values like blood pressure (e.g. "148/95 mmHg")
             if "/" in value_str:
                 continue
 
-            # Extract numeric part from strings like "142 mg/dL" or "6.8%"
             num = ""
             unit = ""
             for ch in value_str:
@@ -189,7 +265,6 @@ def build_knowledge_graph(patient_summary: dict) -> dict:
 async def process_reports(files: list[UploadFile] = File(...)):
     extracted_reports = []
 
-    # Clear previous session's vector store entries (fresh demo each time)
     try:
         existing = collection.get()
         if existing and existing.get("ids"):
@@ -205,44 +280,59 @@ async def process_reports(files: list[UploadFile] = File(...)):
             extracted_reports.append({"error": "empty_or_unreadable", "filename": f.filename})
             continue
 
-        # Add to vector DB for RAG-based Q&A
         try:
             collection.add(
                 documents=[text],
                 metadatas=[{"filename": f.filename}],
                 ids=[f.filename]
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"ChromaDB add failed: {e}")
 
         prompt = EXTRACTION_PROMPT.replace("<<report_text>>", text)
         parsed = None
-        for attempt in range(2):  # try twice
-            result = call_ai(prompt)
+        raw_result = ""
+        for attempt in range(2):
             try:
-                parsed = json.loads(result)
+                raw_result = call_ai(prompt)
+                parsed = json.loads(raw_result)
                 break
             except json.JSONDecodeError:
+                print(f"JSON parse failed on attempt {attempt}: {raw_result[:200]}")
                 continue
+            except Exception as e:
+                print(f"call_ai failed: {e}")
+                break
 
         if parsed:
             parsed["source_file"] = f.filename
             extracted_reports.append(parsed)
         else:
-            extracted_reports.append({"error": "parse_failed", "raw": result, "filename": f.filename})
+            extracted_reports.append({"error": "parse_failed", "raw": raw_result, "filename": f.filename})
+        
+        time.sleep(1)
 
     valid_reports = [r for r in extracted_reports if "error" not in r]
-    valid_reports.sort(key=lambda x: x.get("date", ""))
+    valid_reports.sort(key=lambda x: parse_date_safe(x.get("date", "")))
 
-    analysis_prompt = ANALYSIS_PROMPT.replace("<<n>>", str(len(valid_reports)))
-    analysis_prompt = analysis_prompt.replace("<<json_data>>", json.dumps(valid_reports, indent=2))
-    analysis_result = call_ai(analysis_prompt)
-    analysis = json.loads(analysis_result)
+    try:
+        analysis_prompt = ANALYSIS_PROMPT.replace("<<n>>", str(len(valid_reports)))
+        analysis_prompt = analysis_prompt.replace("<<json_data>>", json.dumps(valid_reports, indent=2))
+        analysis_result = call_ai(analysis_prompt)
+        analysis = json.loads(analysis_result)
+    except Exception as e:
+        print(f"Analysis failed: {e}")
+        analysis = {"patient_summary": {}, "timeline": [], "risk_flags": []}
+
     trends = compute_trends(valid_reports)
     knowledge_graph = build_knowledge_graph(analysis.get("patient_summary", {}))
 
-    summary_prompt = DOCTOR_SUMMARY_PROMPT.replace("<<json_data>>", json.dumps(analysis, indent=2))
-    doctor_summary = call_ai(summary_prompt)
+    try:
+        summary_prompt = DOCTOR_SUMMARY_PROMPT.replace("<<json_data>>", json.dumps(analysis, indent=2))
+        doctor_summary = call_ai(summary_prompt)
+    except Exception as e:
+        print(f"Summary failed: {e}")
+        doctor_summary = "Summary generation failed."
 
     return {
         "extracted_reports": extracted_reports,
@@ -251,7 +341,6 @@ async def process_reports(files: list[UploadFile] = File(...)):
         "trends": trends,
         "knowledge_graph": knowledge_graph
     }
-
 
 @app.post("/ask")
 async def ask_question(payload: dict):
