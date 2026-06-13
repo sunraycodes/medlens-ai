@@ -1,7 +1,8 @@
 import os
 import json
 import io
-import uuid
+import re
+import time
 from datetime import datetime
 import requests
 import pdfplumber
@@ -15,7 +16,6 @@ from prompts import EXTRACTION_PROMPT, ANALYSIS_PROMPT, DOCTOR_SUMMARY_PROMPT, R
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-import time
 
 load_dotenv()
 
@@ -73,10 +73,7 @@ def call_ai(prompt: str) -> str:
                 last_error = result
                 continue
             text = result["choices"][0]["message"]["content"].strip()
-            # Strip all markdown code fences
-            text = text.strip()
             if "```" in text:
-                import re
                 text = re.sub(r"```(?:json)?\s*", "", text)
                 text = text.replace("```", "").strip()
             return text
@@ -91,7 +88,6 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
     filename = file.filename.lower()
     if filename.endswith(".pdf"):
         text = ""
-        # First attempt: pdfplumber (strict)
         try:
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 for page in pdf.pages:
@@ -103,7 +99,6 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
         except Exception:
             pass
 
-        # Second attempt: pdfplumber with caching disabled (handles bad XRef)
         try:
             with pdfplumber.open(io.BytesIO(content), laparams={}) as pdf:
                 for page in pdf.pages:
@@ -118,9 +113,7 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
         except Exception:
             pass
 
-        # Third attempt: pdfminer directly with relaxed settings
         try:
-            from pdfminer.high_level import extract_text as pdfminer_extract
             from pdfminer.pdfpage import PDFPage
             from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
             from pdfminer.converter import TextConverter
@@ -130,10 +123,7 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
             out = io.StringIO()
             device = TextConverter(rsrcmgr, out, laparams=LAParams())
             interpreter = PDFPageInterpreter(rsrcmgr, device)
-            for page in PDFPage.get_pages(
-                io.BytesIO(content),
-                check_extractable=False,  # skip extractable check
-            ):
+            for page in PDFPage.get_pages(io.BytesIO(content), check_extractable=False):
                 try:
                     interpreter.process_page(page)
                 except Exception:
@@ -145,7 +135,6 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
         except Exception:
             pass
 
-        # If all PDF attempts fail, return empty string (handled upstream)
         return ""
     else:
         return content.decode("utf-8", errors="ignore")
@@ -154,27 +143,17 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
 def parse_date_safe(date_str):
     if not date_str:
         return datetime.min
-
-    formats = [
-        "%Y-%m-%d",
-        "%d-%m-%Y",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%Y/%m/%d"
-    ]
-
+    formats = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"]
     for fmt in formats:
         try:
             return datetime.strptime(date_str, fmt)
         except ValueError:
             continue
-
     return datetime.min
 
-def compute_trends(valid_reports: list) -> list:
-    """Algorithmically detect trends in lab values across reports (no AI)."""
-    test_history = {}
 
+def compute_trends(valid_reports: list) -> list:
+    test_history = {}
     for report in valid_reports:
         date = report.get("date", "")
         for lab in report.get("lab_values", []):
@@ -182,10 +161,8 @@ def compute_trends(valid_reports: list) -> list:
             value_str = lab.get("value", "")
             if not test_name or not value_str:
                 continue
-
             if "/" in value_str:
                 continue
-
             num = ""
             unit = ""
             for ch in value_str:
@@ -193,12 +170,10 @@ def compute_trends(valid_reports: list) -> list:
                     num += ch
                 elif num:
                     unit += ch
-
             try:
                 num_val = float(num)
             except ValueError:
                 continue
-
             test_history.setdefault(test_name, []).append({
                 "date": date,
                 "value": num_val,
@@ -213,14 +188,7 @@ def compute_trends(valid_reports: list) -> list:
         first = history[0]
         last = history[-1]
         delta = round(last["value"] - first["value"], 2)
-
-        if delta > 0:
-            direction = "increasing"
-        elif delta < 0:
-            direction = "decreasing"
-        else:
-            direction = "stable"
-
+        direction = "increasing" if delta > 0 else "decreasing" if delta < 0 else "stable"
         trends.append({
             "test": test_name,
             "history": history,
@@ -232,32 +200,25 @@ def compute_trends(valid_reports: list) -> list:
             "last_value": last["value"],
             "last_date": last["date"]
         })
-
     return trends
 
 
 def build_knowledge_graph(patient_summary: dict) -> dict:
-    """Build a simple patient -> conditions/medications/allergies graph (no AI)."""
     nodes = []
     edges = []
-
     nodes.append({"id": "patient", "label": "Patient", "type": "patient"})
-
     for condition in patient_summary.get("conditions", []):
         node_id = f"condition_{condition}"
         nodes.append({"id": node_id, "label": condition, "type": "condition"})
         edges.append({"source": "patient", "target": node_id, "relation": "diagnosed_with"})
-
     for med in patient_summary.get("current_medications", []):
         node_id = f"medication_{med}"
         nodes.append({"id": node_id, "label": med, "type": "medication"})
         edges.append({"source": "patient", "target": node_id, "relation": "prescribed"})
-
     for allergy in patient_summary.get("allergies", []):
         node_id = f"allergy_{allergy}"
         nodes.append({"id": node_id, "label": allergy, "type": "allergy"})
         edges.append({"source": "patient", "target": node_id, "relation": "allergic_to"})
-
     return {"nodes": nodes, "edges": edges}
 
 
@@ -277,7 +238,11 @@ async def process_reports(files: list[UploadFile] = File(...)):
         text = extract_text_from_file(f, content)
 
         if not text.strip():
-            extracted_reports.append({"error": "empty_or_unreadable", "filename": f.filename})
+            extracted_reports.append({
+                "error": "empty_or_unreadable",
+                "filename": f.filename,
+                "detail": "Could not extract text."
+            })
             continue
 
         try:
@@ -291,13 +256,8 @@ async def process_reports(files: list[UploadFile] = File(...)):
 
         prompt = EXTRACTION_PROMPT.replace("<<report_text>>", text)
         parsed = None
-<<<<<<< HEAD
         raw_result = ""
         for attempt in range(2):
-=======
-        for attempt in range(2):
-            result = call_ai(prompt)
->>>>>>> b3daca393f39bae66b2b139a3806e7cfa55a05c1
             try:
                 raw_result = call_ai(prompt)
                 parsed = json.loads(raw_result)
@@ -314,11 +274,10 @@ async def process_reports(files: list[UploadFile] = File(...)):
             extracted_reports.append(parsed)
         else:
             extracted_reports.append({"error": "parse_failed", "raw": raw_result, "filename": f.filename})
-        
+
         time.sleep(1)
 
     valid_reports = [r for r in extracted_reports if "error" not in r]
-<<<<<<< HEAD
     valid_reports.sort(key=lambda x: parse_date_safe(x.get("date", "")))
 
     try:
@@ -329,11 +288,6 @@ async def process_reports(files: list[UploadFile] = File(...)):
     except Exception as e:
         print(f"Analysis failed: {e}")
         analysis = {"patient_summary": {}, "timeline": [], "risk_flags": []}
-=======
-    valid_reports.sort(
-    key=lambda x: parse_date_safe(x.get("date", ""))
-    )
->>>>>>> b3daca393f39bae66b2b139a3806e7cfa55a05c1
 
     trends = compute_trends(valid_reports)
     knowledge_graph = build_knowledge_graph(analysis.get("patient_summary", {}))
@@ -352,6 +306,7 @@ async def process_reports(files: list[UploadFile] = File(...)):
         "trends": trends,
         "knowledge_graph": knowledge_graph
     }
+
 
 @app.post("/ask")
 async def ask_question(payload: dict):
@@ -376,23 +331,18 @@ async def ask_question(payload: dict):
     prompt = RAG_QA_PROMPT.replace("<<context>>", context)
     prompt = prompt.replace("<<question>>", question)
     answer = call_ai(prompt)
-
     return {"answer": answer, "sources": [m["filename"] for m in metas]}
 
 
 @app.post("/export-pdf")
 async def export_pdf(payload: dict):
-    """Takes {'doctor_summary': '...'} and returns a downloadable PDF"""
     text = payload.get("doctor_summary", "")
-
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
-
     story.append(Paragraph("MedLens AI — Doctor Handoff Summary", styles["Title"]))
     story.append(Spacer(1, 12))
-
     for line in text.split("\n"):
         line = line.strip()
         if not line:
@@ -404,10 +354,8 @@ async def export_pdf(payload: dict):
             story.append(Paragraph(f"• {line[1:].strip()}", styles["Normal"]))
         else:
             story.append(Paragraph(line, styles["Normal"]))
-
     doc.build(story)
     buffer.seek(0)
-
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
